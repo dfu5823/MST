@@ -53,20 +53,28 @@ def tensor2image(tensor, batch=0):
     return (tensor if tensor.ndim<5 else torch.swapaxes(tensor[batch], 0, 1).reshape(-1, *tensor.shape[-2:])[:,None])
 
 
-def tensor_mask2image(tensor, mask_hot, batch=0, alpha=0.25, colors=None, exclude_chs=[]):
+def tensor_mask2image(tensor, mask_hot, batch=0, alpha=0.25, colors=None, exclude_chs=[], exclude_classes=[0]):
     """Transform a tensor and a one-hot mask into multiple 2D RGB images.
 
     Args:
         tensor (torch.Tensor): Image tensor. Can be 3D volume of shape [B, C, D, W, H] or 2D of shape [B, C, H, W]
-        mask_hot (torch.Tensor): One-Hot encoded mask of shape [B, Classes, D, W, H] or [B, Classes, H, W]
+        mask_hot (torch.Tensor): One-Hot encoded mask of shape [B, Classes, D, W, H] or [B, Classes, H, W] or Binary mask (Classes=1)
         batch (int, optional): Batch to use if input is 3D. Defaults to 0.
         alpha (float, optional): 1-Transparency. Defaults to 0.25.
+        colors: List or string containing the colors
+        exclude_chs: image channels that should not overlay by mask 
+        exclude_classes : classes that should be excluded - typically background (0)
+
 
     Returns:
         torch.Tensor: Tensor of 2D-RGB images with transparent mask on each. For 3D will be [CxD, 3, H, W] for 2D will be [B, 3, H, W] 
     """
+    
+    mask_hot = one_hot(mask_hot[:, 0], 2) if mask_hot.shape[1] ==1 else mask_hot # Ensure one-hot 
     mask_hot = mask_hot.type(torch.bool).cpu() # To bool and cpu (see bug below)
-    mask_hot = mask_hot if mask_hot.ndim<5 else torch.swapaxes(mask_hot[batch], 0, 1) # 3D [B, C, D, H, W] -> [C, D, H, W]. 2D [B, C, H, W] -> [B, C, H, W]
+    mask_hot = mask_hot if mask_hot.ndim<5 else torch.swapaxes(mask_hot[batch], 0, 1) # 3D [B, C, D, H, W] -> [D, C, H, W]. 2D [B, C, H, W] -> [B, C, H, W]
+    mask_hot = torch.stack([ mask_hot[:, cls_idx] for cls_idx in range(mask_hot.shape[1]) if cls_idx not in exclude_classes ], dim=1) 
+    
     image = minmax_norm(tensor, 255).type(torch.uint8).cpu() # To uint8 and cpu (see bug below)
     image = image[None] if image.ndim==4 else image[batch][:,:,None] # 3D [B, C, D, H, W] -> [C, D, 1, H, W]. 2D [B, C, H, W] -> [1, B, C, H, W] 
     image = torch.cat([image for _ in range(3)], dim=2) if image.shape[2]!=3 else image # Ensure RGB  [*, 3, H, W] 
