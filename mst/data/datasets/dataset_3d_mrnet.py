@@ -2,6 +2,7 @@ from pathlib import Path
 import pandas as pd 
 import torchio as tio 
 import torch.utils.data as data 
+import torch
 
 from .augmentations.augmentations_3d import ImageOrSubjectToTensor, RescaleIntensity, ZNormalization, CropOrPad
 
@@ -28,21 +29,25 @@ class MRNet_Dataset3D(data.Dataset):
         ):
         super().__init__()
         self.path_root = self.PATH_ROOT if path_root is None else Path(path_root)
+        self.split = split 
 
         if transform is None: 
             self.transform = tio.Compose([
                 tio.Lambda(lambda x: x.transpose(-1, 1)),
                 tio.Resize(image_resize) if image_resize is not None else tio.Lambda(lambda x: x),
                 tio.Resample(resample) if resample is not None else tio.Lambda(lambda x: x),
-                tio.RandomFlip((0,1,2)) if flip else tio.Lambda(lambda x: x),
-                CropOrPad(image_crop, random_center=random_center) if image_crop is not None else tio.Lambda(lambda x: x),
-                ZNormalization(per_channel=True, per_slice=False, percentiles=(0.5, 99.5)),
-                tio.RandomAffine(scales=0, degrees=(0, 0, 0, 0, 0,90), translation=0, isotropic=True) if random_rotate else tio.Lambda(lambda x: x),
-                # tio.Lambda(lambda x: x.moveaxis(1, 2) if torch.rand((1,),)[0]<0.5 else x ) if random_rotate else tio.Lambda(lambda x: x),
-                tio.RandomNoise() if noise else tio.Lambda(lambda x: x),
-                # tio.Lambda(lambda x: x/2, types_to_apply=tio.INTENSITY),
-                # tio.Clamp((0-0.449)/0.226, (1-0.449)/0.226), #[-1.98, 2.43]
-                ImageOrSubjectToTensor() if to_tensor else tio.Lambda(lambda x: x) # [C, W, H, D] -> [C, D, H, W]
+
+                CropOrPad((150, 150, 32), random_center=False, padding_mode='minimum'), 
+                tio.Resize((224, 224, 32)),
+
+                ZNormalization(per_channel=True, per_slice=False, masking_method=lambda x:(x>x.min()) & (x<x.max())),
+                # tio.Lambda(lambda x: x.moveaxis(1, 2) if torch.rand((1,),)[0]<0.5 else x ) if random_rotate else tio.Lambda(lambda x: x), # WARNING: 1,2 if Subject, 2, 3 if tensor
+                tio.RandomAffine(scales=0, degrees=(0, 0, 0, 0, 0,90), translation=0, isotropic=True, default_pad_value='minimum') if random_rotate else tio.Lambda(lambda x: x),
+                tio.RandomFlip((0,1,2)) if flip else tio.Lambda(lambda x: x), # WARNING: Padding mask 
+                tio.Lambda(lambda x:-x if torch.rand((1,),)[0]<0.5 else x, types_to_apply=[tio.INTENSITY]) if noise else tio.Lambda(lambda x: x),
+                tio.RandomNoise(std=(0.0, 0.25)) if noise else tio.Lambda(lambda x: x),
+                
+                ImageOrSubjectToTensor()            
             ])
         else:
             self.transform = transform
@@ -71,23 +76,18 @@ class MRNet_Dataset3D(data.Dataset):
         target =  int(item[self.LABEL])
 
     
-        img = self.load_img(self.path_root/'preprocessed/data'/folder/'coronal'/f'{uid:04d}.nii.gz') # sagittal T2, coronal T1, and axial PD 
-        img = self.transform(img)
-
-        # img = torch.cat([
-        #     self.transform(self.load_img(self.path_root/'preprocessed/data'/folder/plane/f'{uid:04d}.nii.gz'))
-        #     for plane in ['sagittal', 'coronal', 'axial' ]   
-        # ])
-
-        # images = tio.Subject(**{
-        #     plane:self.load_img(self.path_root/'preprocessed/data'/folder/plane/f'{uid:04d}.nii.gz')
-        #     for plane in ['sagittal', 'coronal', 'axial']
-        # })
-        # images = self.transform(tio.Resample(images['coronal'])(images)) 
-        # img = torch.cat(list(images.values()))
+        plane = 'sagittal'
+        img = self.load_img(self.path_root/'preprocessed/data'/folder/plane/f'{uid:04d}.nii.gz') # sagittal T2, coronal T1, and axial PD 
         
+        mask_bg = tio.LabelMap(tensor=torch.ones_like(img.data, dtype=torch.int32), affine=img.affine)
+        sub = tio.Subject(img=img, mask_bg=mask_bg)
+        sub = self.transform(sub)
 
-        return {'uid':uid, 'source': img, 'target':target} # 'axial':img_axial, 
+        img = sub['img']
+        mask_bg = sub['mask_bg']
+        src_key_padding_mask = ~(mask_bg[0].sum(-1).sum(-1)>0)      
+
+        return {'uid':uid, 'source': img, 'target':target, 'src_key_padding_mask':src_key_padding_mask}
     
     def load_id(self, id):
         index = self.df[self.df['ID'] == id].index[0]
