@@ -45,14 +45,14 @@ def get_model(name, **kwargs):
         raise ValueError(f"Unknown model: {name}")
 
 
-def _pred_trans(model, source, save_attn=False, use_softmax=True):
+def _pred_trans(model, source, src_key_padding_mask, save_attn=False, use_softmax=True):
     # Run model
     if isinstance(model, ResNetSliceTrans) and save_attn:
-        pred = model(source, save_attn=save_attn)
+        pred = model(source, src_key_padding_mask=src_key_padding_mask, save_attn=save_attn)
     else:
         with torch.no_grad():
-            pred = model(source, save_attn=save_attn)
-    
+            pred = model(source, src_key_padding_mask=src_key_padding_mask, save_attn=save_attn)
+
     if use_softmax: # Necessary to standardize the scale before TTA average 
         pred = torch.softmax(pred, dim=-1)
 
@@ -74,13 +74,13 @@ def _pred_trans(model, source, save_attn=False, use_softmax=True):
 
 
 
-def _pred_resnet(model, source, save_attn=False, use_softmax=True):
+def _pred_resnet(model, source, src_key_padding_mask, save_attn=False, use_softmax=True):
     # Run model
     if save_attn: # Grads required 
-        pred = model(source, save_attn=True)
+        pred = model(source, src_key_padding_mask=src_key_padding_mask, save_attn=True)
     else:
         with torch.no_grad():
-            pred = model(source, save_attn=False)
+            pred = model(source, src_key_padding_mask=src_key_padding_mask, save_attn=False)
     
     if use_softmax: # Necessary to standardize the scale before TTA average 
         pred = torch.softmax(pred, dim=-1)
@@ -96,7 +96,8 @@ def _pred_resnet(model, source, save_attn=False, use_softmax=True):
     return pred, weight, weight_slice
 
 
-def run_pred(model, source, save_attn=False, use_softmax=True, use_tta=False):
+def run_pred(model, batch, save_attn=False, use_softmax=True, use_tta=False):
+    source, src_key_padding_mask = batch['source'], batch.get('src_key_padding_mask', None)
     pred_func = None 
     if isinstance(model, ResNetSliceTrans): 
         pred_func = _pred_trans
@@ -200,7 +201,7 @@ if __name__ == "__main__":
                 continue
 
             # Run prediction 
-            pred, weight, weight_slice = run_pred(model, source, save_attn=True, use_softmax=use_tta, use_tta=use_tta)
+            pred, weight, weight_slice = run_pred(model, batch, save_attn=True, use_softmax=use_tta, use_tta=use_tta)
             
             # Transfer weights to binary segmentation mask   
             weight = weight.detach().cpu()
@@ -248,17 +249,22 @@ if __name__ == "__main__":
                 break 
 
             # Run prediction 
-            pred, weight, weight_slice = run_pred(model, source, save_attn=True, use_softmax=use_tta, use_tta=use_tta)
+            pred, weight, weight_slice = run_pred(model, batch, save_attn=True, use_softmax=use_tta, use_tta=use_tta)
+
             
             # Clip  
+            weight_slice = weight_slice.detach().cpu()
+            weight_slice /= weight_slice.sum()
+
             weight = weight.detach().cpu()
-            weight = weight.clip(*np.quantile(weight, [0.95, 0.999]))
+            weight = weight.clip(*np.quantile(weight, [0.995, 0.999]))
+
 
             # Save 
             save_image(tensor2image(source), path_out_dir/f'input_{uid}.png', normalize=True)
             save_image(tensor_cam2image(minmax_norm(source), minmax_norm(weight), alpha=0.5), 
                         path_out_dir/f"overlay_{uid}.png", normalize=False)
-            save_image(tensor_cam2image(minmax_norm(source), minmax_norm(weight_slice.detach()), alpha=0.5), 
+            save_image(tensor_cam2image(minmax_norm(source), minmax_norm(weight_slice), alpha=0.5), 
                         path_out_dir/f"overlay_{uid}_slice.png", normalize=False)
             if dataset in ['LIDC']:
                 save_image(tensor_cam2image(minmax_norm(source), minmax_norm(batch['mask'].detach().cpu()), alpha=0.5),
@@ -266,7 +272,7 @@ if __name__ == "__main__":
                 
         else:
             # Run prediction 
-            pred, _, _ = run_pred(model, source, save_attn=False, use_softmax=use_tta, use_tta=use_tta)
+             pred, _, _ = run_pred(model, batch, save_attn=False, use_softmax=use_tta, use_tta=use_tta)
 
         pred = pred.cpu()
 
@@ -318,6 +324,7 @@ if __name__ == "__main__":
         tprs, fprs, auc_val, thrs, opt_idx, cm = plot_roc_curve(y_true_lab, y_pred_lab, axis, fontdict=fontdict)
         fig.tight_layout()
         fig.savefig(path_out/f'roc.png', dpi=300)
+        logger.info("AUC {:.2f}".format(auc_val))
 
 
         #  -------------------------- Confusion Matrix -------------------------
