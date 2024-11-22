@@ -2,6 +2,7 @@ from pathlib import Path
 import pandas as pd 
 import torch.utils.data as data 
 import torchio as tio
+import torch
 
 from .augmentations.augmentations_3d import ImageOrSubjectToTensor, RescaleIntensity, ZNormalization, CropOrPad
 
@@ -28,19 +29,22 @@ class DUKE_Dataset3D(data.Dataset):
         ):
         self.path_root = self.PATH_ROOT if path_root is None else Path(path_root)
         self.path_root_data = self.path_root/'preprocessed_crop/data'
+        self.split = split 
 
         if transform is None: 
             self.transform = tio.Compose([
                 tio.Resize(image_resize) if image_resize is not None else tio.Lambda(lambda x: x),
                 tio.Resample(resample) if resample is not None else tio.Lambda(lambda x: x),
-                tio.RandomFlip(1, flip_probability=1), # Just for viewing, otherwise upside down
-                tio.RandomFlip((0,1,2)) if flip else tio.Lambda(lambda x: x),
-                CropOrPad(image_crop, random_center=random_center) if image_crop is not None else tio.Lambda(lambda x: x),
-                ZNormalization(per_channel=True, per_slice=False, percentiles=(0.5, 99.5), masking_method=lambda x:x>0),
-                tio.RandomAffine(scales=0, degrees=(0, 0, 0, 0, 0,90), translation=0, isotropic=True) if random_rotate else tio.Lambda(lambda x: x),
-                #tio.Lambda(lambda x: x.moveaxis(1, 2) if torch.rand((1,),)[0]<0.5 else x ),               
-                tio.RandomNoise() if noise else tio.Lambda(lambda x: x),
-                ImageOrSubjectToTensor() if to_tensor else tio.Lambda(lambda x: x) # [C, W, H, D] -> [C, D, H, W]
+                tio.Flip(1), # Just for viewing, otherwise upside down
+                CropOrPad(image_crop, random_center=random_center, padding_mode='minimum') if image_crop is not None else tio.Lambda(lambda x: x),
+                ZNormalization(per_channel=True, per_slice=False, masking_method=lambda x:(x>x.min()) & (x<x.max()), percentiles=(0.5, 99.5)),   # 0.5, 99.5   2.5, 97.5
+                # tio.Lambda(lambda x: x.moveaxis(1, 2) if torch.rand((1,),)[0]<0.5 else x ) if random_rotate else tio.Lambda(lambda x: x), # WARNING: 1,2 if Subject, 2, 3 if tensor
+                tio.RandomAffine(scales=0, degrees=(0, 0, 0, 0, 0,90), translation=0, isotropic=True, default_pad_value='minimum') if random_rotate else tio.Lambda(lambda x: x),
+                tio.RandomFlip((0,1,2)) if flip else tio.Lambda(lambda x: x), # WARNING: Padding mask 
+                tio.Lambda(lambda x:-x if torch.rand((1,),)[0]<0.5 else x, types_to_apply=[tio.INTENSITY]) if noise else tio.Lambda(lambda x: x),
+                tio.RandomNoise(std=(0.0, 0.25)) if noise else tio.Lambda(lambda x: x),
+
+                ImageOrSubjectToTensor() if to_tensor else tio.Lambda(lambda x: x)             
             ])
         else:
             self.transform = transform
