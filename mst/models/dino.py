@@ -4,6 +4,7 @@ from .base_model import BasicClassifier
 from .utils.transformer_blocks import TransformerEncoderLayer
 import torch.nn as nn
 from einops import rearrange
+from .extern.dinov2.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
 
 def slices2rgb(tensor):
     # [B, 1, D, H, W] -> [B*D//3, 3, H, W]
@@ -35,14 +36,15 @@ class DinoV2ClassifierSlice(BasicClassifier):
             spatial_dims=2,
             pretrained=True,
             save_attn = False,
-            rotary_positional_encoding='RoPE',
+            rotary_positional_encoding=None,
             optimizer_kwargs={'lr': 1e-6, 'weight_decay': 1e-2},
-            model_size = 'b', # [s, b, l, 'g']
+            model_size = 's', # [s, b, l, 'g']
             use_registers = False,
             use_bottleneck=False,
             use_slice_pos_emb=False,
             enable_linear = True,
-            enable_trans = True,
+            enable_trans = True, # Deprecated 
+            slice_fusion='transformer',
             freeze=False,
             **kwargs
         ):
@@ -51,14 +53,16 @@ class DinoV2ClassifierSlice(BasicClassifier):
         self.attention_maps = []
         self.attention_maps_slice = []
         self.use_registers = use_registers
+        self.slice_fusion_type = slice_fusion
 
         if pretrained:
             if use_registers:
                 self.encoder = torch.hub.load('facebookresearch/dinov2', f'dinov2_vit{model_size}14_reg')
             else:
                 self.encoder = torch.hub.load('facebookresearch/dinov2', f'dinov2_vit{model_size}14')
-        # else:
-        #     self.encoder = Dinov2Model()
+        else:
+            Model = {'s': vit_small, 'b': vit_base, 'l':vit_large, 'g':vit_giant2 }[model_size]
+            self.encoder = Model(patch_size=14, num_register_tokens=0)
    
         # Freeze backbone 
         if freeze:
@@ -68,11 +72,11 @@ class DinoV2ClassifierSlice(BasicClassifier):
     
         emb_ch = self.encoder.num_features 
         if use_bottleneck:
-            self.bottleneck = nn.Linear(emb_ch, 192)
-            emb_ch = 192 
+            self.bottleneck = nn.Linear(emb_ch, emb_ch//4)
+            emb_ch = emb_ch//4 
         self.emb_ch = emb_ch
 
-        if enable_trans:
+        if slice_fusion == 'transformer':
             if use_slice_pos_emb:
                 self.slice_pos_emb = nn.Embedding(256, emb_ch) # WARNING: Assuming max. 256 slices
 
@@ -80,18 +84,20 @@ class DinoV2ClassifierSlice(BasicClassifier):
                 encoder_layer=TransformerEncoderLayer(
                     d_model=emb_ch,
                     nhead=12, 
-                    dim_feedforward=4*emb_ch,
+                    dim_feedforward=1*emb_ch,
                     dropout=0.0,
                     batch_first=True,
                     norm_first=True,
                     rotary_positional_encoding=rotary_positional_encoding
                 ),
-                num_layers=4,
+                num_layers=1,
                 norm=nn.LayerNorm(emb_ch)
             )
             self.cls_token = nn.Parameter(torch.randn(1, 1, emb_ch))
-        # else:
-        #     emb_ch = emb_ch*32
+        elif slice_fusion == 'linear':
+            emb_ch = emb_ch*32
+        elif slice_fusion == 'average':
+            pass 
 
         self.linear = nn.Linear(emb_ch, out_ch) if enable_linear else nn.Identity()
 
@@ -100,7 +106,7 @@ class DinoV2ClassifierSlice(BasicClassifier):
         
 
 
-    def forward(self, source, save_attn=False, **kwargs):   
+    def forward(self, source, save_attn=False, src_key_padding_mask=None, **kwargs):   
 
         if save_attn:
             fastpath_enabled = torch.backends.mha.get_fastpath_enabled()
@@ -134,13 +140,20 @@ class DinoV2ClassifierSlice(BasicClassifier):
             pos = torch.arange(0, x.shape[1], dtype=torch.long, device=x.device)
             x += self.slice_pos_emb(pos)
         
-        if hasattr(self, 'slice_fusion'):
+        if self.slice_fusion_type == 'transformer':
             x = torch.concat([self.cls_token.repeat(B, 1, 1), x], dim=1)
-            x = self.slice_fusion(x)
+ 
+            if src_key_padding_mask is not None: 
+                src_key_padding_mask = src_key_padding_mask.to(self.device)
+                src_key_padding_mask_cls = torch.zeros((B, 1), device=self.device, dtype=bool)
+                src_key_padding_mask = torch.concat([src_key_padding_mask_cls, src_key_padding_mask], dim=1)# [Batch, L]
+       
+            x = self.slice_fusion(x, src_key_padding_mask=src_key_padding_mask)
             x = x[:, 0]
-        else:
+        elif self.slice_fusion_type == 'linear':
+            x = rearrange(x, 'b d e -> b (d e)')
+        elif self.slice_fusion_type == 'average':
             x = x.mean(dim=1, keepdim=False)
-            # x = rearrange(x, 'b d e -> b (d e)')
 
         if save_attn:
             torch.backends.mha.set_fastpath_enabled(fastpath_enabled)
@@ -172,15 +185,18 @@ class DinoV2ClassifierSlice(BasicClassifier):
 
         return attention_map_slice
 
-    def get_attention_maps(self):
+    def get_plane_attention(self):
         attention_map_dino = self.attention_maps[-1] # [B*D, Heads, 1+HW, 1+HW]
         img_slice = slice(5, None) if self.use_registers else slice(1, None) # see https://github.com/facebookresearch/dinov2/blob/e1277af2ba9496fbadf7aec6eba56e8d882d1e35/dinov2/models/vision_transformer.py#L264 
         attention_map_dino = attention_map_dino[:,:, 0, img_slice] # [B*D, Heads, HW]
         attention_map_dino[:,:,0] = 0
         attention_map_dino /= attention_map_dino.sum(dim=-1, keepdim=True)
+        return attention_map_dino
 
+    def get_attention_maps(self):
+        attention_map_dino = self.get_plane_attention()
         attention_map_slice = self.get_slice_attention()
-
+        
         attention_map = attention_map_slice*attention_map_dino
         return attention_map
     
