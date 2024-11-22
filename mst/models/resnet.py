@@ -149,27 +149,27 @@ class ResNetSliceTrans(ResNet):
             **kwargs
         )
         
-        emb_ch = 512
+        emb_ch = 512 if model <= 34 else 2048
         self.attention_maps_slice = []
 
         self.slice_fusion = nn.TransformerEncoder(
             encoder_layer=TransformerEncoderLayer(
                 d_model=emb_ch,
-                nhead=8,
-                dim_feedforward=4*emb_ch,
+                nhead=16,
+                dim_feedforward=1*emb_ch,
                 dropout=0.0,
                 batch_first=True,
                 norm_first=True,
                 rotary_positional_encoding=rotary_positional_encoding
             ),
-            num_layers=4,
+            num_layers=1,
             norm=nn.LayerNorm(emb_ch)
         )
         self.cls_token = nn.Parameter(torch.randn(1, 1, emb_ch))
         self.linear = nn.Linear(emb_ch, out_ch)
 
 
-    def forward(self, source, **kwargs):
+    def forward(self, source, src_key_padding_mask=None, **kwargs):
         x = source.to(self.device) # [B, C, D, H, W]
         if kwargs.get('save_attn'):
             self.attention_maps_slice = []
@@ -182,7 +182,13 @@ class ResNetSliceTrans(ResNet):
         x = super().forward(x, **kwargs) # [(B D), C, H, W] -> [(B D), out] 
         x = rearrange(x, '(b d) e -> b d e', b=B)
         x = torch.concat([self.cls_token.repeat(B, 1, 1), x], dim=1)
-        x = self.slice_fusion(x)
+        
+        if src_key_padding_mask is not None: 
+            src_key_padding_mask = src_key_padding_mask.to(self.device)
+            src_key_padding_mask_cls = torch.zeros((B, 1), device=self.device, dtype=bool)
+            src_key_padding_mask = torch.concat([src_key_padding_mask_cls, src_key_padding_mask], dim=1)# [Batch, L]
+        
+        x = self.slice_fusion(x, src_key_padding_mask=src_key_padding_mask)
         x = x[:, 0]
         x = self.linear(x)
         
