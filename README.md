@@ -1,10 +1,10 @@
 # Medical Slice Transformer: Improved Diagnosis and Explainability on 3D Medical Images with DINOv2 
 
-Please see our paper: 
+Please see our paper:  https://doi.org/10.48550/arXiv.2411.15802
 
 ![MST](media/MST.jpg)
 <br>
-Figure: Visualization of the proposed MST architecture. 
+<b>Figure:  Overview of the Model Architecture and Attention Flow. </b> <br>(a) The Medical Slice Transformer framework processes individual MRI or CT slices using 2D image encoders, such as DINOv2, and then passes the encoded outputs through the Slice Transformer for downstream classification tasks. <br>(b) Visualization of attention mechanisms showing how the Slice Transformer assigns attention to specific slices and how within-slice attention is further refined to specific patches, resulting in a combined attention map highlighting regions of interest in the input volume. 
 
 ## Step 1: Setup 
 * Clone this repository `git clone https://github.com/mueller-franzes/MST`
