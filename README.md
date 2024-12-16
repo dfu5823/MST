@@ -12,14 +12,27 @@ Please see our paper:  https://doi.org/10.48550/arXiv.2411.15802
 * Run `conda activate MST`
 
 ## Step 2: Setup Data
+
+### Option A: Public Data 
+* Download data (use 'Classic Directory Name' for TCIA):
+   * [LIDC-IDRI](https://www.cancerimagingarchive.net/collection/lidc-idri/)
+   * [DUKE](https://www.cancerimagingarchive.net/collection/duke-breast-cancer-mri/)
+   * [MRNet](https://stanfordmlgroup.github.io/competitions/mrnet/)
+* Follow preprocessing steps in [scripts/preprocessing](scripts/preprocessing)
+
+
+### Option B: Private Data
 * Add your own dataset to [mst/data/datasets](mst/data/datasets)
 * Add your own dataset to `get_dataset()` in [scripts/main_train.py](scripts/main_train.py)  
 
 ## Step 3: Run Training
+### Option A: Use Trained Models
+Skip training and download the weights from [Zenodo](https://doi.org/10.5281/zenodo.14500631).
+### Option B: Train Models
 Run Script: [scripts/main_train.py](scripts/main_train.py)
 * Eg. `python scripts/main_train.py --dataset LIDC --model ResNet`
 * Use `--model` to select:
-    * ResNet = 3D ResNet34, 
+    * ResNet = 3D ResNet50, 
     * ResNetSliceTrans = MST-ResNet, 
     * DinoV2ClassifierSlice = MST-DINOv2  
 
